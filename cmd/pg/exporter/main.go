@@ -22,6 +22,9 @@ var (
 	backupScrapeInterval  = flag.Duration("backup-list.scrape-interval", 60*time.Second, "Interval between backup-list scrapes.")
 	verifyScrapeInterval  = flag.Duration("wal-verify.scrape-interval", 5*time.Minute, "Interval between wal-verify scrapes.")
 	storageScrapeInterval = flag.Duration("storage-check.scrape-interval", 30*time.Second, "Interval between storage scrapes.")
+	backupTimeout         = flag.Duration("backup-list.timeout", 2*time.Minute, "Timeout of a backup-list run.")
+	verifyTimeout         = flag.Duration("wal-verify.timeout", 10*time.Minute, "Timeout of a wal-verify run.")
+	storageTimeout        = flag.Duration("storage-check.timeout", 10*time.Second, "Timeout of a storage check run.")
 	walgConfigPath        = flag.String("walg.config-path", "", "Path to the wal-g config file.")
 )
 
@@ -42,7 +45,17 @@ func main() {
 			slog.Duration("verify", *verifyScrapeInterval),
 			slog.Duration("storage", *storageScrapeInterval),
 		),
+		slog.Group("timeouts",
+			slog.Duration("backup", *backupTimeout),
+			slog.Duration("verify", *verifyTimeout),
+			slog.Duration("storage", *storageTimeout),
+		),
 	)
+
+	if err := validateDurations(); err != nil {
+		logger.Error("Invalid flag", "error", err)
+		os.Exit(1)
+	}
 
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -61,12 +74,19 @@ func main() {
 	}
 
 	// Create and register the exporter
-	exporter := NewWalgExporter(logger, *walgPath, *backupScrapeInterval, *verifyScrapeInterval, *storageScrapeInterval, *walgConfigPath)
+	exporter := NewWalgExporter(logger, *walgPath,
+		*backupScrapeInterval, *verifyScrapeInterval, *storageScrapeInterval,
+		*backupTimeout, *verifyTimeout, *storageTimeout,
+		*walgConfigPath)
 
 	prometheus.MustRegister(exporter)
 
 	// Start the exporter in a goroutine
-	go exporter.Start(ctx)
+	exporterDone := make(chan struct{})
+	go func() {
+		exporter.Start(ctx)
+		close(exporterDone)
+	}()
 
 	// Set up HTTP server
 	mux := http.NewServeMux()
@@ -83,8 +103,9 @@ func main() {
 	})
 
 	server := &http.Server{
-		Addr:    *listenAddr,
-		Handler: mux,
+		Addr:              *listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// Start HTTP server in a goroutine
@@ -114,5 +135,25 @@ func main() {
 		logger.Error("HTTP server shutdown error", "error", err)
 	}
 
+	// Wait for the running wal-g commands to be killed
+	<-exporterDone
+
 	logger.Info("Exporter shutdown complete")
+}
+
+// validateDurations checks that all intervals and timeouts are positive, time.NewTicker panics otherwise
+func validateDurations() error {
+	for name, d := range map[string]time.Duration{
+		"backup-list.scrape-interval":   *backupScrapeInterval,
+		"wal-verify.scrape-interval":    *verifyScrapeInterval,
+		"storage-check.scrape-interval": *storageScrapeInterval,
+		"backup-list.timeout":           *backupTimeout,
+		"wal-verify.timeout":            *verifyTimeout,
+		"storage-check.timeout":         *storageTimeout,
+	} {
+		if d <= 0 {
+			return fmt.Errorf("-%s must be a positive duration, got %s", name, d)
+		}
+	}
+	return nil
 }

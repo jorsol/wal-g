@@ -36,7 +36,8 @@ The exporter provides the following metrics:
 ### WAL Metrics
 
 - `walg_wal_verify_status{operation}`: WAL verify status (1 = OK, 0 = FAILURE, 2 = WARNING, -1 = UNKNOWN)
-- `walg_wal_integrity_status{timeline_id, timeline_hex}`: WAL integrity status (1 = FOUND, 0 = MISSING)
+- `walg_wal_integrity_status{timeline_id, timeline_hex}`: WAL integrity status per timeline (1 = no lost segments, 0 = lost segments). Only `MISSING_LOST` segments mark a timeline as failed; `MISSING_DELAYED` and `MISSING_UPLOADING` segments are expected while recent WAL is still being uploaded (wal-verify reports them as WARNING).
+- `walg_wal_segments{timeline_id, timeline_hex, status}`: Number of WAL segments per timeline and wal-verify integrity status (`FOUND`, `MISSING_DELAYED`, `MISSING_UPLOADING`, `MISSING_LOST`)
 
 ### Storage Metrics
 
@@ -45,7 +46,7 @@ The exporter provides the following metrics:
 
 ### PITR Metrics
 
-- `walg_pitr_window_seconds` - Point-in-time recovery window size in seconds
+- `walg_pitr_window_seconds` - Point-in-time recovery window size in seconds, measured from the earliest non-permanent backup and computed at scrape time
 
 ### Error Metrics
 
@@ -56,6 +57,14 @@ The exporter provides the following metrics:
 - `walg_backup_list_duration_seconds` - Time taken to execute 'backup-list' during the last collector run
 - `walg_wal_verify_duration_seconds` - Time taken to execute 'wal-verify' during the last collector run
 - `walg_scrape_errors_total` - Total number of scrape errors
+- `walg_scrape_success{operation}` - Whether the last run of the WAL-G command succeeded (1 = success, 0 = failure)
+- `walg_scrape_last_success_timestamp_seconds{operation}` - Time of the last successful run of the WAL-G command (Unix timestamp)
+
+When a WAL-G command fails or times out, the exporter keeps exporting the values from the last successful run. Use `walg_scrape_success` and `walg_scrape_last_success_timestamp_seconds` to detect stale data, for example:
+
+```promql
+time() - walg_scrape_last_success_timestamp_seconds{operation="backup-list"} > 3600
+```
 
 ## Backup Type Detection
 
@@ -86,10 +95,16 @@ go build -o walg-exporter .
 
 - `-backup-list.scrape-interval` duration  
     Interval between backup-list scrapes. (default 1m0s)
-- `-storage-check.scrape-interval` duration  
+- `-backup-list.timeout` duration
+    Timeout of a backup-list run. (default 2m0s)
+- `-storage-check.scrape-interval` duration
     Interval between storage scrapes. (default 30s)
-- `-wal-verify.scrape-interval` duration  
+- `-storage-check.timeout` duration
+    Timeout of a storage check run. (default 10s)
+- `-wal-verify.scrape-interval` duration
     Interval between wal-verify scrapes. (default 5m0s)
+- `-wal-verify.timeout` duration
+    Timeout of a wal-verify run. (default 10m0s)
 - `-walg.config-path` string  
     Path to the wal-g config file.
 - `-walg.path` string  
@@ -358,7 +373,7 @@ walg_storage_latency_seconds 0.619920539
 # HELP walg_storage_up Storage connectivity status (1 = up, 0 = down)
 # TYPE walg_storage_up gauge
 walg_storage_up 1
-# HELP walg_wal_integrity_status WAL integrity status (1 = FOUND, 0 = MISSING)
+# HELP walg_wal_integrity_status WAL integrity status per timeline (1 = no lost segments, 0 = lost segments)
 # TYPE walg_wal_integrity_status gauge
 walg_wal_integrity_status{timeline_hex="00000043",timeline_id="67"} 0
 walg_wal_integrity_status{timeline_hex="00000044",timeline_id="68"} 1
